@@ -1,8 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { contractApi } from './services/api';
+import ChatInterface from './components/ChatInterface';
 
 const ContractForm = () => {
   const [currentStep, setCurrentStep] = useState(-1);
   const [darkMode, setDarkMode] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+  const [showChat, setShowChat] = useState(false);
   const [formData, setFormData] = useState({
     document_id: '',
     ka_category: '',
@@ -13,15 +19,18 @@ const ContractForm = () => {
     business_function: [],
     related_contract_types: [],
     applicable_commercial_models: [],
-    mapping_with_primary_document_id: '',
+    mapping_primary_document: '',
     risk_category: '',
-    valuethreshol_rules_applied: '',
+    valuethreshold_rules: '',
     last_updated: '',
     version_no: '',
-    relevance_tags: []
+    relevance_tags: [],
+    access_control: ''
   });
 
+  const [selectedFile, setSelectedFile] = useState(null);
   const [completedFields, setCompletedFields] = useState([]);
+  const [isProcessingAI, setIsProcessingAI] = useState(false);
   const formRefs = {
     document_id: useRef(null),
     ka_category: useRef(null),
@@ -32,12 +41,13 @@ const ContractForm = () => {
     business_function: useRef(null),
     related_contract_types: useRef(null),
     applicable_commercial_models: useRef(null),
-    mapping_with_primary_document_id: useRef(null),
+    mapping_primary_document: useRef(null),
     risk_category: useRef(null),
-    valuethreshol_rules_applied: useRef(null),
+    valuethreshold_rules: useRef(null),
     last_updated: useRef(null),
     version_no: useRef(null),
-    relevance_tags: useRef(null)
+    relevance_tags: useRef(null),
+    access_control: useRef(null)
   };
 
   const formFields = [
@@ -62,14 +72,15 @@ const ContractForm = () => {
     { name: 'applicable_commercial_models', label: 'Applicable Commercial Models', type: 'multiselect', options: [
       'T&M', 'Fixed Price', 'Loaned Staff', 'Outcome Based'
     ], required: true },
-    { name: 'mapping_with_primary_document_id', label: 'Mapping with Primary Document ID', type: 'text', required: false },
+    { name: 'mapping_primary_document', label: 'Mapping with Primary Document ID', type: 'text', required: false },
     { name: 'risk_category', label: 'Risk Category', type: 'select', options: [
       'Independence', 'Risk Management', 'Cybersecurity'
     ], required: true },
-    { name: 'valuethreshol_rules_applied', label: 'Value Threshold Rules Applied', type: 'textarea', required: false },
+    { name: 'valuethreshold_rules', label: 'Value Threshold Rules Applied', type: 'textarea', required: false },
     { name: 'last_updated', label: 'Last Updated', type: 'date', required: true },
     { name: 'version_no', label: 'Version No', type: 'text', required: true },
-    { name: 'relevance_tags', label: 'Relevance Tags', type: 'tags', required: false }
+    { name: 'relevance_tags', label: 'Relevance Tags', type: 'tags', required: false },
+    { name: 'access_control', label: 'Access Control', type: 'textarea', required: false }
   ];
 
   useEffect(() => {
@@ -163,11 +174,118 @@ const ContractForm = () => {
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (file && file.type === 'application/pdf') {
+      setSelectedFile(file);
+      setError(null);
+    } else {
+      setError('Please select a PDF file');
+      setSelectedFile(null);
+    }
+  };
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
     const currentField = formFields[currentStep];
     if (isFieldValid(currentField)) {
-      console.log(JSON.stringify(formData, null, 2));
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
+        
+        // First, upload the file if selected
+        if (selectedFile) {
+          setSuccess('Uploading file...');
+          const uploadFormData = new FormData();
+          uploadFormData.append('file', selectedFile);
+          
+          const response = await fetch('http://localhost:8000/upload', {
+            method: 'POST',
+            body: uploadFormData,
+          });
+          
+          const result = await response.json();
+          
+          if (result.error) {
+            throw new Error(result.error);
+          }
+          
+          console.log('File uploaded:', result);
+          setSuccess('File uploaded successfully. Processing document...');
+          
+          // Continue with metadata submission
+          const metadataPayload = {
+            ...formData,
+            filepath: result.filepath,
+            // Ensure arrays are properly formatted
+            business_unit: Array.isArray(formData.business_unit) ? formData.business_unit : [],
+            sub_bu: Array.isArray(formData.sub_bu) ? formData.sub_bu : [],
+            business_function: Array.isArray(formData.business_function) ? formData.business_function : [],
+            related_contract_types: Array.isArray(formData.related_contract_types) ? formData.related_contract_types : [],
+            applicable_commercial_models: Array.isArray(formData.applicable_commercial_models) ? formData.applicable_commercial_models : [],
+            risk_category: formData.risk_category ? [formData.risk_category] : [],
+            relevance_tags: Array.isArray(formData.relevance_tags) ? formData.relevance_tags : [],
+            // Ensure optional fields are properly handled
+            mapping_primary_document: formData.mapping_primary_document || null,
+            valuethreshold_rules: formData.valuethreshold_rules || null,
+            access_control: formData.access_control || null,
+            // Format date
+            last_updated: formData.last_updated || new Date().toISOString().split('T')[0]
+          };
+          
+          setSuccess('Submitting metadata...');
+          const metadataResult = await contractApi.submitMetadata(metadataPayload);
+          console.log('Metadata submitted:', metadataResult);
+          setSuccess('Contract and metadata submitted successfully! Processing with AI...');
+          
+          // Automatically trigger AI processing
+          await handleProceedWithAI();
+        }
+        
+      } catch (err) {
+        console.error('Error submitting form:', err);
+        setError(err.message || 'Error submitting form');
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  const handleProceedWithAI = async () => {
+    setIsProcessingAI(true);
+    setError(null);
+    try {
+      if (!selectedFile) {
+        throw new Error('No file selected');
+      }
+
+      setSuccess('Processing document with AI...');
+      const response = await fetch('http://localhost:8000/process-ai', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          document_id: formData.document_id,
+          filepath: selectedFile.name
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || 'Failed to process with AI');
+      }
+
+      setSuccess('AI processing completed successfully! You can now chat with your document.');
+      console.log('AI Processing Result:', data);
+      setShowChat(true);
+    } catch (error) {
+      console.error('Error processing with AI:', error);
+      setError(`Error processing with AI: ${error.message}`);
+    } finally {
+      setIsProcessingAI(false);
     }
   };
 
@@ -382,6 +500,55 @@ const ContractForm = () => {
     setDarkMode(!darkMode);
   };
 
+  const renderFileUpload = () => {
+    return (
+      <div className="mb-6">
+        <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+          Upload Contract Document
+        </label>
+        <input
+          type="file"
+          onChange={handleFileChange}
+          className={`w-full p-2 border rounded-md ${
+            darkMode ? 'bg-gray-800 border-gray-600 text-gray-200' : 'bg-white border-gray-300 text-gray-700'
+          }`}
+          accept=".pdf,.txt,.doc,.docx"
+        />
+        {selectedFile && (
+          <p className={`mt-2 text-sm ${darkMode ? 'text-green-400' : 'text-green-600'}`}>
+            {selectedFile.name} selected
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  const renderMessages = () => {
+    return (
+      <div className="mt-4 space-y-2">
+        {loading && (
+          <div className="flex items-center space-x-2 text-blue-600">
+            <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span>Processing...</span>
+          </div>
+        )}
+        {error && (
+          <div className="p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+            {error}
+          </div>
+        )}
+        {success && (
+          <div className="p-3 bg-green-100 border border-green-400 text-green-700 rounded">
+            {success}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   if (currentStep === -1) {
     return (
       <div className={`fixed inset-0 ${darkMode ? 'bg-gray-900' : 'bg-gradient-to-br from-blue-50 to-white'} flex items-center justify-center`}>
@@ -410,14 +577,14 @@ const ContractForm = () => {
             <div className="space-y-6">
               <div className="animate-fade-in-up">
                 <h1 className={`text-4xl font-bold mb-4 ${darkMode ? 'text-white' : 'text-gray-900'}`}>
-                  Contract Document Form
+                  Contract Analyzer
                 </h1>
                 <div className="h-1 w-20 bg-blue-500 rounded-full"></div>
               </div>
               
               <div className="animate-fade-in-up">
                 <p className={`text-lg leading-relaxed ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                  Let's create your contract document step by step. We'll guide you through each field to ensure all necessary information is captured accurately.
+                  Let's analyze your contract document step by step. We'll guide you through each field to ensure all necessary information is captured accurately.
                 </p>
               </div>
 
@@ -471,6 +638,10 @@ const ContractForm = () => {
   const currentField = formFields[currentStep];
   const isFieldComplete = isFieldValid(currentField);
 
+  if (showChat) {
+    return <ChatInterface documentId={formData.document_id} darkMode={darkMode} />;
+  }
+
   return (
     <div className={`fixed inset-0 ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
       <div className="h-full overflow-y-auto">
@@ -513,6 +684,7 @@ const ContractForm = () => {
               </div>
 
               <form onSubmit={handleSubmit} className="space-y-6">
+                {renderFileUpload()}
                 <div className="space-y-6">
                   {completedFields.map((fieldName, index) => {
                     const field = formFields.find(f => f.name === fieldName);
@@ -574,6 +746,8 @@ const ContractForm = () => {
                     )}
                   </div>
                 </div>
+
+                {renderMessages()}
 
                 <div className={`flex justify-between mt-10 pt-6 border-t ${darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
                   <button
